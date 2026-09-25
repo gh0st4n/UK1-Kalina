@@ -36,25 +36,37 @@ $user_role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
                         <a class="nav-link <?= ($current_page == 'index.php') ? 'active fw-bold text-white' : ''; ?>" href="index.php">Dashboard</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link <?= (in_array($current_page, ['siswa_list.php', 'siswa_tambah.php', 'siswa_edit.php', 'siswa_detail.php'])) ? 'active fw-bold text-white' : ''; ?>" href="siswa_list.php">Data Siswa</a>
+                        <a class="nav-link <?= (in_array($current_page, ['siswa_list.php', 'siswa_tambah.php', 'siswa_edit.php', 'siswa_detail.php'])) ? 'active fw-bold text-white' : ''; ?>" href="siswa_list.php">
+                            <?= ($user_role === 'admin') ? 'Data Siswa' : 'Jadwal Harian'; ?>
+                        </a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link <?= (in_array($current_page, ['kelas_list.php', 'kelas_tambah.php', 'kelas_edit.php'])) ? 'active fw-bold text-white' : ''; ?>" href="kelas_list.php">Data Kelas</a>
-                    </li>
+
+                    <!-- Menu Data Kelas hanya tampil jika role bernilai 'admin' -->
+                    <?php if ($user_role === 'admin'): ?>
+                        <li class="nav-item">
+                            <a class="nav-link <?= (in_array($current_page, ['kelas_list.php', 'kelas_tambah.php', 'kelas_edit.php'])) ? 'active fw-bold text-white' : ''; ?>" href="kelas_list.php">Data Kelas</a>
+                        </li>
+                    <?php endif; ?>
+
                     <li class="nav-item">
                         <a class="nav-link <?= (in_array($current_page, ['guru_list.php', 'guru_tambah.php', 'guru_edit.php'])) ? 'active fw-bold text-white' : ''; ?>" href="guru_list.php">Data Guru</a>
                     </li>
+
+                    <!-- Menu Khusus Siswa untuk melihat absensi pribadi -->
+                    <?php if ($user_role === 'siswa'): ?>
+                        <li class="nav-item">
+                            <a class="nav-link <?= ($current_page == 'absensi_siswa.php') ? 'active fw-bold text-white' : ''; ?>" href="absensi_siswa.php">
+                                <i class="fa-solid fa-clipboard-user me-1"></i> Absensi Saya
+                            </a>
+                        </li>
+                    <?php endif; ?>
                     
                     <!-- Menu Absensi (Dropdown) hanya tampil jika role bernilai 'admin' -->
                     <?php if ($user_role === 'admin'): ?>
                         <li class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle <?= (in_array($current_page, ['absensi.php', 'absensi_rekap.php'])) ? 'active fw-bold text-white' : ''; ?>" href="#" id="navbarDropdownAbsensi" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-                                Absensi
+                        <a class="nav-link <?= ($current_page == 'absensi_rekap.php') ? 'active fw-bold text-white' : ''; ?>" href="absensi_rekap.php">    
+                        Rekap Absensi
                             </a>
-                            <ul class="dropdown-menu" aria-labelledby="navbarDropdownAbsensi">
-                                <li><a class="dropdown-item" href="absensi.php"><i class="fa-solid fa-pen-to-square me-2"></i>Input Absensi</a></li>
-                                <li><a class="dropdown-item" href="absensi_rekap.php"><i class="fa-solid fa-chart-line me-2"></i>Rekap Absensi</a></li>
-                            </ul>
                         </li>
                     <?php endif; ?>
 

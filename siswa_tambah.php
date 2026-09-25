@@ -88,19 +88,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Simpan data jika tidak ada error upload
                 if (empty($error)) {
-                    $query = "INSERT INTO siswa (nisn, nama, kelas_id, alamat, foto) VALUES (:nisn, :nama, :kelas_id, :alamat, :foto)";
-                    $stmt = $db->prepare($query);
-                    $stmt->bindParam(':nisn', $nisn);
-                    $stmt->bindParam(':nama', $nama);
-                    $stmt->bindParam(':kelas_id', $kelas_id);
-                    $stmt->bindParam(':alamat', $alamat);
-                    $stmt->bindParam(':foto', $foto_nama);
+                    try {
+                        // Gunakan Transaction agar penambahan ke tabel siswa & users berjalan berbarengan
+                        $db->beginTransaction();
 
-                    if ($stmt->execute()) {
+                        // 1. Insert ke tabel siswa
+                        $query = "INSERT INTO siswa (nisn, nama, kelas_id, alamat, foto) VALUES (:nisn, :nama, :kelas_id, :alamat, :foto)";
+                        $stmt = $db->prepare($query);
+                        $stmt->bindParam(':nisn', $nisn);
+                        $stmt->bindParam(':nama', $nama);
+                        $stmt->bindParam(':kelas_id', $kelas_id);
+                        $stmt->bindParam(':alamat', $alamat);
+                        $stmt->bindParam(':foto', $foto_nama);
+                        $stmt->execute();
+
+                        // Ambil ID siswa yang baru saja terbuat
+                        $new_siswa_id = $db->lastInsertId();
+
+                        // 2. Otomatis buatkan Akun User di tabel users
+                        // Username = NISN, Password = NISN (Default), Role = siswa
+                        $hashed_password = password_hash($nisn, PASSWORD_BCRYPT);
+                        $role_siswa = 'siswa';
+
+                        $query_user = "INSERT INTO users (username, password, role, siswa_id) VALUES (:username, :password, :role, :siswa_id)";
+                        $stmt_user = $db->prepare($query_user);
+                        $stmt_user->bindParam(':username', $nisn);
+                        $stmt_user->bindParam(':password', $hashed_password);
+                        $stmt_user->bindParam(':role', $role_siswa);
+                        $stmt_user->bindParam(':siswa_id', $new_siswa_id);
+                        $stmt_user->execute();
+
+                        // Commit transaksi
+                        $db->commit();
+
                         header("Location: siswa_list.php?msg=added");
                         exit();
-                    } else {
-                        $error = "Gagal menambahkan data siswa.";
+
+                    } catch (PDOException $e) {
+                        // Rollback jika terjadi kegagalan
+                        $db->rollBack();
+                        $error = "Gagal menambahkan data siswa dan akun: " . $e->getMessage();
                     }
                 }
             }

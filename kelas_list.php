@@ -20,6 +20,12 @@ if (empty($_SESSION['csrf_token'])) {
 // Samakan logika penentuan role dengan header.php
 $user_role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
 
+// Proteksi Hak Akses: Jika bukan admin, kembalikan ke dashboard
+if ($user_role !== 'admin') {
+    header("Location: index.php");
+    exit();
+}
+
 include 'views/header.php';
 
 // Query Data Kelas
